@@ -237,7 +237,14 @@ class ParakeetTextGenerator:
 
             self._model.to(device)
             if dtype != torch.float32:
-                self._model.to(dtype)
+                # NeMo's audio featurizer emits float32 tensors. Keep the
+                # checkpoint weights in their native dtype and use autocast
+                # around transcribe() so float16/bfloat16 inputs match the
+                # selected inference precision.
+                logger.debug(
+                    "[ParakeetTextGenerator] Using %s autocast for inference",
+                    dtype,
+                )
             if hasattr(self._model, "eval"):
                 self._model.eval()
 
@@ -261,6 +268,22 @@ class ParakeetTextGenerator:
             raise
 
         logger.info("[ParakeetTextGenerator] Model loaded")
+
+    def _transcribe(self, **kwargs: Any):
+        """Run NeMo transcription with the configured CUDA autocast policy."""
+        if self._model is None:
+            raise RuntimeError("Parakeet model is not loaded")
+
+        import torch
+
+        use_autocast = (
+            str(self._device).startswith("cuda")
+            and self._dtype in {torch.float16, torch.bfloat16}
+        )
+        if use_autocast:
+            with torch.autocast(device_type="cuda", dtype=self._dtype):
+                return self._model.transcribe(**kwargs)
+        return self._model.transcribe(**kwargs)
 
     def _uses_legacy_transcribe_api(self) -> bool:
         """Detect NeMo releases whose transcribe method lacks timestamp kwargs."""
@@ -388,7 +411,7 @@ class ParakeetTextGenerator:
 
         timestamp_request_fallback = self._legacy_transcribe_api
         try:
-            raw_outputs = self._model.transcribe(**transcribe_kwargs)
+            raw_outputs = self._transcribe(**transcribe_kwargs)
         except (NotImplementedError, TypeError) as exc:
             if not timestamp_enabled:
                 raise
@@ -403,7 +426,7 @@ class ParakeetTextGenerator:
             self._legacy_transcribe_api = True
             self._configure_native_timestamps()
             try:
-                raw_outputs = self._model.transcribe(
+                raw_outputs = self._transcribe(
                     audio=[str(path) for path in paths],
                     batch_size=self._config["batch_size"],
                     return_hypotheses=True,
@@ -417,7 +440,7 @@ class ParakeetTextGenerator:
                     "retrying text-only transcription",
                     legacy_exc,
                 )
-                raw_outputs = self._model.transcribe(
+                raw_outputs = self._transcribe(
                     audio=[str(path) for path in paths],
                     batch_size=self._config["batch_size"],
                 )

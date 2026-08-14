@@ -23,7 +23,8 @@ python -m pip install torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 \
   --index-url https://download.pytorch.org/whl/cu121
 python -m pip install \
   "datasets==2.20.0" "fsspec==2024.5.0" \
-  "huggingface-hub==0.23.5" "pytorch-lightning==2.2.1"
+  "huggingface-hub==0.23.5" "numpy==1.26.4" \
+  "pytorch-lightning==2.2.1"
 python -m pip install "nemo-toolkit==2.0.0rc0" "nemo-toolkit[asr]==2.0.0rc0"
 python -m pip install -e ".[cli,parakeet]"
 ```
