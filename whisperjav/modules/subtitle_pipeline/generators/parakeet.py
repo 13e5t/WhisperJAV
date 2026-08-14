@@ -156,6 +156,40 @@ class ParakeetTextGenerator:
         path = Path(model_id).expanduser()
         return path.suffix.lower() == ".nemo" or path.exists()
 
+    @classmethod
+    def _load_hf_nemo_checkpoint(cls, nemo_asr, model_id: str, device: str):
+        """Load the Japanese model-card checkpoint from the Hugging Face repo."""
+        if model_id != cls.DEFAULT_MODEL_ID:
+            return None
+
+        try:
+            from huggingface_hub import hf_hub_download
+
+            checkpoint = hf_hub_download(
+                repo_id=model_id,
+                filename="parakeet-ja.nemo",
+            )
+        except Exception as exc:
+            # Keep custom NeMo repositories on the regular from_pretrained path.
+            # The Japanese model card publishes a .nemo archive rather than the
+            # model_config.yaml files expected by NeMo's repo loader.
+            logger.debug(
+                "[ParakeetTextGenerator] Hugging Face .nemo checkpoint lookup "
+                "unavailable for %s: %s",
+                model_id,
+                exc,
+            )
+            return None
+
+        logger.info(
+            "[ParakeetTextGenerator] Restoring Hugging Face checkpoint: %s",
+            checkpoint,
+        )
+        return nemo_asr.models.ASRModel.restore_from(
+            restore_path=str(checkpoint),
+            map_location=device,
+        )
+
     def load(self) -> None:
         """Load the selected Parakeet checkpoint using the current NeMo API."""
         if self._loaded:
@@ -190,10 +224,16 @@ class ParakeetTextGenerator:
                     map_location=device,
                 )
             else:
-                self._model = nemo_asr.models.ASRModel.from_pretrained(
-                    model_name=model_id,
-                    map_location=device,
+                self._model = self._load_hf_nemo_checkpoint(
+                    nemo_asr,
+                    model_id,
+                    device,
                 )
+                if self._model is None:
+                    self._model = nemo_asr.models.ASRModel.from_pretrained(
+                        model_name=model_id,
+                        map_location=device,
+                    )
 
             self._model.to(device)
             if dtype != torch.float32:

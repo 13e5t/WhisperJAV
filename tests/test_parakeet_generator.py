@@ -84,6 +84,13 @@ def _install_fake_nemo(monkeypatch, model):
     monkeypatch.setitem(sys.modules, "nemo", nemo)
     monkeypatch.setitem(sys.modules, "nemo.collections", collections)
     monkeypatch.setitem(sys.modules, "nemo.collections.asr", asr)
+    import huggingface_hub
+
+    monkeypatch.setattr(
+        huggingface_hub,
+        "hf_hub_download",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("offline test")),
+    )
     return FakeASRModel
 
 
@@ -222,6 +229,29 @@ class TestParakeetInference:
         checkpoint = tmp_path / "parakeet-ja.nemo"
 
         generator = ParakeetTextGenerator(model_id=str(checkpoint))
+        generator.load()
+
+        asr_model.restore_from.assert_called_once_with(
+            restore_path=str(checkpoint),
+            map_location="cpu",
+        )
+        asr_model.from_pretrained.assert_not_called()
+
+    def test_model_card_repo_restores_published_nemo_archive(self, monkeypatch, tmp_path):
+        from whisperjav.modules.subtitle_pipeline.generators.parakeet import (
+            ParakeetTextGenerator,
+        )
+
+        model = FakeNeMoModel()
+        asr_model = _install_fake_nemo(monkeypatch, model)
+        _force_cpu(monkeypatch)
+        checkpoint = tmp_path / "parakeet-ja.nemo"
+        monkeypatch.setattr(
+            "huggingface_hub.hf_hub_download",
+            lambda **kwargs: str(checkpoint),
+        )
+
+        generator = ParakeetTextGenerator()
         generator.load()
 
         asr_model.restore_from.assert_called_once_with(
