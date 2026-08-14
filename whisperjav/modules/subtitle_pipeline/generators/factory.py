@@ -15,6 +15,7 @@ _REGISTRY: dict[str, str] = {
     "qwen3": "whisperjav.modules.subtitle_pipeline.generators.qwen3.Qwen3TextGenerator",
     "anime-whisper": "whisperjav.modules.subtitle_pipeline.generators.anime_whisper.AnimeWhisperGenerator",
     "cohere": "whisperjav.modules.subtitle_pipeline.generators.cohere.CohereTextGenerator",
+    "parakeet": "whisperjav.modules.subtitle_pipeline.generators.parakeet.ParakeetTextGenerator",
 }
 
 # Cache for loaded classes

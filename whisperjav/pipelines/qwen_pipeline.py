@@ -160,7 +160,16 @@ class QwenPipeline(BasePipeline):
         # Generator backend selection (v1.8.6+)
         # "qwen3" (default) uses Qwen3-ASR text-only mode.
         # "anime-whisper" uses litagin/anime-whisper (HF Whisper fine-tune).
+        # "parakeet" uses the optional NeMo Parakeet CTC Japanese backend.
         generator_backend: str = "qwen3",
+
+        # Parakeet-native Japanese cue regrouping (opt-in; ignored by other
+        # generator backends).
+        parakeet_regroup: bool = False,
+        parakeet_gap_split_ms: float = 400.0,
+        parakeet_max_cue_duration: float = 6.0,
+        parakeet_max_cue_chars: int = 30,
+        parakeet_min_cue_duration: float = 0.5,
 
         # Output
         subs_language: str = "native",
@@ -270,6 +279,21 @@ class QwenPipeline(BasePipeline):
 
         # Generator backend selection (v1.8.6+)
         self.generator_backend = generator_backend
+        self.parakeet_regroup_enabled = bool(
+            parakeet_regroup and generator_backend == "parakeet"
+        )
+        self.parakeet_regroup_config = None
+        if generator_backend == "parakeet":
+            from whisperjav.modules.subtitle_pipeline.regroupers.japanese import (
+                JapaneseRegroupConfig,
+            )
+
+            self.parakeet_regroup_config = JapaneseRegroupConfig(
+                gap_split_ms=parakeet_gap_split_ms,
+                max_duration_s=parakeet_max_cue_duration,
+                max_chars=parakeet_max_cue_chars,
+                min_duration_s=parakeet_min_cue_duration,
+            )
 
         # anime-whisper preset: vad_only (skip ForcedAligner, save ~1GB VRAM),
         # passthrough cleaner, no step-down (no aligner = no collapse),
@@ -303,6 +327,21 @@ class QwenPipeline(BasePipeline):
             self.stepdown_enabled = True            # aligner present → stepdown safe
             self.segmenter_chunk_threshold = 1.0    # Cohere prefers fewer cuts
             self.segmenter_max_group_duration = 6.0
+        elif generator_backend == "parakeet":
+            # Parakeet returns native CTC timing. Keep its text unchanged and
+            # avoid a second pass through the Qwen ForcedAligner.
+            self.assembly_cleaner_enabled = False
+            self.stepdown_enabled = False
+
+        # QwenPipeline historically owns a Qwen model default. Replace that
+        # inherited default for Parakeet so logs/configuration also show the
+        # actual checkpoint selected by this backend. Explicit model IDs are
+        # preserved for future NeMo-compatible checkpoints.
+        if generator_backend == "parakeet" and model_id in (
+            None,
+            "Qwen/Qwen3-ASR-1.7B",
+        ):
+            model_id = "grider-transwithai/parakeet-ctc-1.1b-ja"
 
         # Qwen ASR config (stored as dict for deferred construction)
         self._asr_config = {
@@ -400,6 +439,9 @@ class QwenPipeline(BasePipeline):
         from whisperjav.modules.subtitle_pipeline.framers.factory import TemporalFramerFactory
         from whisperjav.modules.subtitle_pipeline.generators.factory import TextGeneratorFactory
         from whisperjav.modules.subtitle_pipeline.orchestrator import DecoupledSubtitlePipeline
+        from whisperjav.modules.subtitle_pipeline.regroupers.japanese import (
+            JapaneseNativeRegrouper,
+        )
         from whisperjav.modules.subtitle_pipeline.types import HardeningConfig, StepDownConfig
 
         cfg = self._asr_config
@@ -451,6 +493,21 @@ class QwenPipeline(BasePipeline):
                 language=cfg.get("language", "ja"),
                 max_new_tokens=cfg.get("max_new_tokens", 512),
             )
+        elif self.generator_backend == "parakeet":
+            # Parakeet CTC emits native character/word/segment timestamps.
+            # Reuse the existing qwen timestamp switch as the small
+            # compatibility control: ``none`` disables native requests.
+            parakeet_model_id = cfg.get("model_id")
+            if parakeet_model_id in (None, "Qwen/Qwen3-ASR-1.7B"):
+                parakeet_model_id = "grider-transwithai/parakeet-ctc-1.1b-ja"
+            generator = TextGeneratorFactory.create(
+                "parakeet",
+                model_id=parakeet_model_id,
+                device=cfg["device"],
+                dtype=cfg["dtype"],
+                batch_size=cfg.get("batch_size", 1),
+                timestamp_level="char" if cfg.get("timestamps", "word") != "none" else "none",
+            )
         else:
             # Default: Qwen3 text-only mode (existing behavior)
             generator = TextGeneratorFactory.create(
@@ -473,6 +530,9 @@ class QwenPipeline(BasePipeline):
             # D3: passthrough cleaner for Cohere until v1.8.14 benchmark
             # surfaces JAV-specific artifacts that warrant a dedicated cleaner.
             cleaner = TextCleanerFactory.create("passthrough")
+        elif self.generator_backend == "parakeet":
+            # Do not alter text after native CTC timing has been attached.
+            cleaner = TextCleanerFactory.create("passthrough")
         elif self.assembly_cleaner_enabled:
             cleaner_config = AssemblyCleanerConfig(enabled=True)
             cleaner = TextCleanerFactory.create(
@@ -488,7 +548,12 @@ class QwenPipeline(BasePipeline):
         # entirely so we save VRAM and take Branch B (aligner-free) in the
         # orchestrator's _step9_reconstruct_and_harden().
         aligner = None
-        if self.timestamp_mode == TimestampMode.VAD_ONLY:
+        if self.generator_backend == "parakeet":
+            # Native timestamps are consumed by the orchestrator. A
+            # timestamp-less or malformed result gets the existing
+            # frame-boundary fallback instead of a Qwen alignment pass.
+            pass
+        elif self.timestamp_mode == TimestampMode.VAD_ONLY:
             # No aligner → Branch B; no collapse possible → step-down irrelevant
             pass
         elif cfg.get("use_aligner", True):
@@ -509,6 +574,10 @@ class QwenPipeline(BasePipeline):
                 fallback_max_group_s=self.stepdown_fallback_group,
             )
 
+        native_regrouper = None
+        if self.parakeet_regroup_enabled and self.parakeet_regroup_config is not None:
+            native_regrouper = JapaneseNativeRegrouper(self.parakeet_regroup_config)
+
         return DecoupledSubtitlePipeline(
             framer=framer,
             generator=generator,
@@ -521,6 +590,7 @@ class QwenPipeline(BasePipeline):
             language=cfg.get("language", "ja"),
             context=cfg.get("context", ""),
             stepdown_config=stepdown_cfg,
+            native_regrouper=native_regrouper,
         )
 
     # ------------------------------------------------------------------

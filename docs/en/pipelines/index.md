@@ -39,3 +39,4 @@ Run two passes with different pipelines and merge the results. See [Ensemble Mod
 
 - [ChronosJAV](chronosjav.md) — anime-whisper and Kotoba models for anime/JAV content
 - [Qwen3-ASR](qwen3-asr.md) — alternative ASR engine with strong Japanese text quality
+- [Parakeet CTC](parakeet-ctc.md) — Japanese NeMo ASR with native timestamps

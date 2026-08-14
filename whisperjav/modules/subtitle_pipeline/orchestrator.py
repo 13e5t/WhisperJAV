@@ -21,6 +21,7 @@ VRAM swap pattern:
 """
 
 import json
+import math
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
@@ -41,6 +42,9 @@ from whisperjav.modules.subtitle_pipeline.reconstruction import (
     reconstruct_from_words,
     resolve_regroup,
     split_frame_to_words,
+)
+from whisperjav.modules.subtitle_pipeline.regroupers.japanese import (
+    JapaneseNativeRegrouper,
 )
 from whisperjav.modules.subtitle_pipeline.types import (
     HardeningConfig,
@@ -78,6 +82,7 @@ class DecoupledSubtitlePipeline:
         language: str = "ja",
         context: str = "",
         stepdown_config: Optional[StepDownConfig] = None,
+        native_regrouper: Optional[JapaneseNativeRegrouper] = None,
     ):
         """
         Initialize the pipeline with protocol components.
@@ -95,6 +100,8 @@ class DecoupledSubtitlePipeline:
             stepdown_config: Optional step-down retry config. When enabled
                 and alignment collapses on a scene, the orchestrator re-frames
                 with tighter grouping and retries generation + alignment.
+            native_regrouper: Optional Parakeet-only native timestamp
+                regrouper. Other generators leave this as ``None``.
         """
         self.framer = framer
         self.generator = generator
@@ -105,6 +112,7 @@ class DecoupledSubtitlePipeline:
         self.language = language
         self.context = context
         self.stepdown_config = stepdown_config
+        self.native_regrouper = native_regrouper
 
         # Sentinel stats accumulated across all scenes
         self.sentinel_stats: dict[str, Any] = {
@@ -274,8 +282,16 @@ class DecoupledSubtitlePipeline:
                 framer_override_max_group=framer_override_max_group,
                 vad_audio_paths=vad_audio_paths,
             )
-            scene_texts = self._step2_4_generate_and_clean(scene_frames, frame_audio_paths, scene_durations)
-            scene_alignments = self._step5_7_align(scene_frames, frame_audio_paths, scene_texts, scene_durations)
+            scene_texts, scene_native_words = self._step2_4_generate_and_clean(
+                scene_frames, frame_audio_paths, scene_durations,
+            )
+            scene_alignments = self._step5_7_align(
+                scene_frames,
+                frame_audio_paths,
+                scene_texts,
+                scene_durations,
+                native_frame_words=scene_native_words,
+            )
             results = self._step9_reconstruct_and_harden(
                 scene_frames, scene_texts, scene_alignments,
                 scene_audio_paths, scene_durations,
@@ -423,14 +439,18 @@ class DecoupledSubtitlePipeline:
         scene_frames: list[list[TemporalFrame]],
         frame_audio_paths: list[list[Path]],
         scene_durations: list[float],
-    ) -> list[list[str]]:
+    ) -> tuple[list[list[str]], list[list[Optional[list[dict[str, Any]]]]]]:
         """
         Generate text for each frame, then clean.
 
         VRAM lifecycle: generator.load() → generate all → generator.unload()
 
         Returns:
-            scene_texts: Per-scene, per-frame cleaned text strings.
+            A tuple of per-scene, per-frame cleaned text strings and optional
+            native timestamp word dictionaries.  Native timestamps are kept
+            in frame-relative coordinates and are offset in Step 9 just like
+            TextAligner output.  ``None`` means the generator did not return
+            usable native timestamps for that frame.
         """
         import time as _time
 
@@ -453,6 +473,7 @@ class DecoupledSubtitlePipeline:
 
         # Phase 1: Generation
         scene_raw_texts: list[list[str]] = []
+        scene_native_words: list[list[Optional[list[dict[str, Any]]]]] = []
 
         if needs_generation:
             self.generator.load()
@@ -462,6 +483,7 @@ class DecoupledSubtitlePipeline:
                 frames = scene_frames[scene_idx]
                 audio_paths = frame_audio_paths[scene_idx]
                 raw_texts = []
+                raw_native_words: list[Optional[list[dict[str, Any]]]] = []
 
                 logger.info(
                     "[DecoupledPipeline] Generating scene %d/%d (%.1fs audio)...",
@@ -474,8 +496,10 @@ class DecoupledSubtitlePipeline:
                 for frame_idx, frame in enumerate(frames):
                     if frame.text is not None:
                         raw_texts.append(frame.text)
+                        raw_native_words.append(None)
                     else:
                         raw_texts.append(None)  # placeholder
+                        raw_native_words.append(None)
                         gen_indices.append(frame_idx)
                         gen_audio_paths.append(audio_paths[frame_idx])
 
@@ -490,7 +514,9 @@ class DecoupledSubtitlePipeline:
                             audio_durations=[frames[i].duration for i in gen_indices],
                         )
                         for i, gen_idx in enumerate(gen_indices):
-                            raw_texts[gen_idx] = gen_results[i].text
+                            result = gen_results[i] if i < len(gen_results) else None
+                            raw_texts[gen_idx] = getattr(result, "text", "") if result is not None else ""
+                            raw_native_words[gen_idx] = self._extract_native_words(result)
                     except Exception:
                         # Batch failed — fall back to per-frame
                         logger.warning(
@@ -505,7 +531,8 @@ class DecoupledSubtitlePipeline:
                                     language=self.language,
                                     context=self.context if self.context else None,
                                 )
-                                raw_texts[gen_idx] = result.text
+                                raw_texts[gen_idx] = getattr(result, "text", "")
+                                raw_native_words[gen_idx] = self._extract_native_words(result)
                             except Exception:
                                 logger.error(
                                     "[DecoupledPipeline] Generation failed for scene %d frame %d",
@@ -514,10 +541,12 @@ class DecoupledSubtitlePipeline:
                                     exc_info=True,
                                 )
                                 raw_texts[gen_idx] = ""
+                                raw_native_words[gen_idx] = None
 
                 # Replace any remaining None with empty string
                 raw_texts = [t if t is not None else "" for t in raw_texts]
                 scene_raw_texts.append(raw_texts)
+                scene_native_words.append(raw_native_words)
 
                 # Per-scene generation result
                 scene_chars = sum(len(t) for t in raw_texts)
@@ -562,7 +591,77 @@ class DecoupledSubtitlePipeline:
             n_scenes, total_clean_chars, total_raw_chars - total_clean_chars, n_empty, elapsed,
         )
 
-        return scene_texts
+        return scene_texts, scene_native_words
+
+    @staticmethod
+    def _extract_native_words(result: Any) -> Optional[list[dict[str, Any]]]:
+        """Normalize optional generator-native timing to the shared word shape.
+
+        TextGenerator implementations return ``WordTimestamp`` instances via
+        ``TranscriptionResult.words``.  The orchestrator converts them to the
+        same small dictionaries used by TextAligner output so the existing
+        reconstruction and regrouping code remains the single downstream
+        path.  Invalid records are dropped; an all-invalid result becomes
+        ``None`` and receives the documented frame-boundary fallback.
+        """
+        if result is None:
+            return None
+
+        metadata = getattr(result, "metadata", {}) or {}
+        invalid_count = metadata.get("native_timestamp_invalid_count", 0)
+        try:
+            invalid_count = int(invalid_count)
+        except (TypeError, ValueError):
+            invalid_count = 0
+        if invalid_count > 0:
+            logger.warning(
+                "[DecoupledPipeline] Native timestamp result contains %d malformed "
+                "record(s); using the parent frame fallback",
+                invalid_count,
+            )
+            return None
+
+        native_words = getattr(result, "words", None)
+        if native_words is None:
+            native_words = metadata.get("native_timestamps")
+        if not native_words:
+            return None
+
+        normalized: list[dict[str, Any]] = []
+        for native in native_words:
+            if isinstance(native, dict):
+                token = native.get("word", native.get("text", native.get("char", "")))
+                start = native.get("start")
+                end = native.get("end")
+            else:
+                token = getattr(native, "word", getattr(native, "text", ""))
+                start = getattr(native, "start", None)
+                end = getattr(native, "end", None)
+
+            try:
+                start_value = float(start)
+                end_value = float(end)
+            except (TypeError, ValueError):
+                continue
+
+            token = str(token).strip() if token is not None else ""
+            if (
+                not token
+                or not math.isfinite(start_value)
+                or not math.isfinite(end_value)
+                or start_value < 0.0
+                or end_value <= start_value
+            ):
+                continue
+
+            normalized.append({
+                "word": token,
+                "start": start_value,
+                "end": end_value,
+                "source": "native",
+            })
+
+        return normalized or None
 
     # -----------------------------------------------------------------------
     # Steps 5-7: Alignment
@@ -574,6 +673,7 @@ class DecoupledSubtitlePipeline:
         frame_audio_paths: list[list[Path]],
         scene_texts: list[list[str]],
         scene_durations: list[float],
+        native_frame_words: Optional[list[list[Optional[list[dict[str, Any]]]]]] = None,
     ) -> Optional[list[list[list[dict[str, Any]]]]]:
         """
         Align text to audio for word-level timestamps.
@@ -586,7 +686,11 @@ class DecoupledSubtitlePipeline:
             Each word dict: {'word': str, 'start': float, 'end': float}
         """
         if self.aligner is None:
-            return None
+            return self._native_or_frame_fallback(
+                scene_frames,
+                scene_texts,
+                native_frame_words,
+            )
 
         import time as _time
 
@@ -710,6 +814,74 @@ class DecoupledSubtitlePipeline:
 
         return scene_alignments
 
+    @staticmethod
+    def _native_or_frame_fallback(
+        scene_frames: list[list[TemporalFrame]],
+        scene_texts: list[list[str]],
+        native_frame_words: Optional[list[list[Optional[list[dict[str, Any]]]]]],
+    ) -> Optional[list[list[list[dict[str, Any]]]]]:
+        """Use native generator timing, with a per-frame fallback when absent.
+
+        A ``None`` return preserves the existing aligner-free Branch B for
+        text-only generators.  Once any native timing is present, the method
+        returns a complete per-frame alignment list: native entries are kept,
+        while timestamp-less frames use their temporal frame bounds only.
+        This avoids silently replacing valid native timing with scene-wide VAD
+        distribution and allows the existing Japanese regrouping stage to
+        split one speech region into multiple subtitle cues.
+        """
+        if not native_frame_words:
+            return None
+
+        has_native = any(
+            frame_words
+            for scene_words in native_frame_words
+            for frame_words in scene_words
+        )
+        if not has_native:
+            return None
+
+        scene_alignments: list[list[list[dict[str, Any]]]] = []
+        fallback_frames = 0
+        for scene_idx, frames in enumerate(scene_frames):
+            scene_words = (
+                native_frame_words[scene_idx]
+                if scene_idx < len(native_frame_words)
+                else []
+            )
+            texts = scene_texts[scene_idx] if scene_idx < len(scene_texts) else []
+            frame_alignments: list[list[dict[str, Any]]] = []
+
+            for frame_idx, frame in enumerate(frames):
+                native = scene_words[frame_idx] if frame_idx < len(scene_words) else None
+                if native:
+                    frame_alignments.append(native)
+                    continue
+
+                text = texts[frame_idx] if frame_idx < len(texts) else ""
+                if not text.strip():
+                    frame_alignments.append([])
+                    continue
+
+                # Native timestamps are relative to the sliced frame audio.
+                # Generate the fallback in that same coordinate system; the
+                # normal frame→scene offset is applied later.
+                fallback_frames += 1
+                fallback_words = split_frame_to_words(text, 0.0, frame.duration)
+                for word in fallback_words:
+                    word["source"] = "frame_fallback"
+                frame_alignments.append(fallback_words)
+
+            scene_alignments.append(frame_alignments)
+
+        if fallback_frames:
+            logger.warning(
+                "[DecoupledPipeline] %d frame(s) had no valid native timestamps; "
+                "using frame-boundary fallback for those frames",
+                fallback_frames,
+            )
+        return scene_alignments
+
     # -----------------------------------------------------------------------
     # Step 9: Reconstruction + Sentinel + Hardening
     # -----------------------------------------------------------------------
@@ -755,16 +927,39 @@ class DecoupledSubtitlePipeline:
                 word_count = 0
                 assessment = None
                 recovery_info = None
+                native_regroup_diagnostics = None
 
                 if scene_alignments is not None:
                     # Branch A: Aligned workflow — merge frame-relative → scene-relative
                     # Resolve regroup mode for Branch A
                     regroup_a = resolve_regroup(self.hardening_config.regroup_mode, is_branch_b=False)
 
-                    if regroup_a is False:
+                    frame_word_groups, frame_parent_regions = self._group_frame_words_with_bounds(
+                        frames,
+                        scene_alignments[scene_idx],
+                    )
+                    native_flags = [
+                        any(word.get("source") == "native" for word in group)
+                        for group in frame_word_groups
+                    ]
+
+                    if self.native_regrouper is not None and any(native_flags):
+                        # Regroup before stable-ts reconstruction. This keeps
+                        # native Parakeet boundaries from being merged again
+                        # by REGROUP_JAV's broader gap heuristic.
+                        cue_groups, native_regroup_diagnostics = self.native_regrouper.regroup_scene(
+                            frame_word_groups,
+                            frame_parent_regions,
+                            native_flags=native_flags,
+                        )
+                        word_count = sum(len(group) for group in cue_groups)
+                        flat_words = [word for group in cue_groups for word in group]
+                        assessment = assess_alignment_quality(flat_words, duration)
+                        sentinel_status = assessment["status"]
+                        result = reconstruct_frame_native(cue_groups, audio_path)
+                    elif regroup_a is False:
                         # Frame-native path: one segment per frame, skip sentinel recovery.
                         # User explicitly set regroup_mode=OFF — they want raw frame output.
-                        frame_word_groups = self._group_frame_words(frames, scene_alignments[scene_idx])
                         word_count = sum(len(g) for g in frame_word_groups)
 
                         # Sentinel assessment for diagnostics only (no recovery)
@@ -943,6 +1138,7 @@ class DecoupledSubtitlePipeline:
                     hardening_clamped=hardening_diag.clamped_count,
                     hardening_sorted=hardening_diag.sorted,
                     vad_regions=vad_regions,
+                    native_regroup=native_regroup_diagnostics,
                 )
                 diagnostics = asdict(scene_diag)
 
@@ -1003,6 +1199,7 @@ class DecoupledSubtitlePipeline:
                         "word": w["word"],
                         "start": w["start"] + offset,
                         "end": w["end"] + offset,
+                        **({"source": w["source"]} if "source" in w else {}),
                     }
                 )
 
@@ -1023,16 +1220,35 @@ class DecoupledSubtitlePipeline:
         Returns:
             List of per-frame word groups (empty frames omitted).
         """
+        groups, _ = DecoupledSubtitlePipeline._group_frame_words_with_bounds(
+            frames,
+            frame_word_lists,
+        )
+        return groups
+
+    @staticmethod
+    def _group_frame_words_with_bounds(
+        frames: list[TemporalFrame],
+        frame_word_lists: list[list[dict[str, Any]]],
+    ) -> tuple[list[list[dict[str, Any]]], list[tuple[float, float]]]:
+        """Return scene-relative frame groups and their parent bounds."""
         groups: list[list[dict[str, Any]]] = []
+        parent_regions: list[tuple[float, float]] = []
         for frame, word_list in zip(frames, frame_word_lists):
             offset = frame.start
             frame_words = [
-                {"word": w["word"], "start": w["start"] + offset, "end": w["end"] + offset}
+                {
+                    "word": w["word"],
+                    "start": w["start"] + offset,
+                    "end": w["end"] + offset,
+                    **({"source": w["source"]} if "source" in w else {}),
+                }
                 for w in word_list
             ]
             if frame_words:
                 groups.append(frame_words)
-        return groups
+                parent_regions.append((frame.start, frame.end))
+        return groups, parent_regions
 
     # -----------------------------------------------------------------------
     # Speech regions resolution

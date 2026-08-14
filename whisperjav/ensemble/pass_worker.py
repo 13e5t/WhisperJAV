@@ -400,6 +400,11 @@ DEFAULT_QWEN_PARAMS = {
     "qwen_stepdown": True,
     "qwen_generator_backend": "qwen3",
     "qwen_regroup_mode": "off",
+    "qwen_parakeet_regroup": False,
+    "qwen_parakeet_gap_split_ms": 400.0,
+    "qwen_parakeet_max_cue_duration": 6.0,
+    "qwen_parakeet_max_cue_chars": 30,
+    "qwen_parakeet_min_cue_duration": 0.5,
     # NOTE: qwen_max_group_duration, qwen_chunk_threshold,
     # qwen_stepdown_initial_group, and qwen_stepdown_fallback_group are
     # intentionally OMITTED here.  QwenPipeline.__init__ owns these
@@ -446,6 +451,11 @@ def prepare_qwen_params(pass_config: Dict[str, Any]) -> Dict[str, Any]:
         "stepdown_initial_group": "qwen_stepdown_initial_group",
         "stepdown_fallback_group": "qwen_stepdown_fallback_group",
         "regroup_mode": "qwen_regroup_mode",
+        "parakeet_regroup": "qwen_parakeet_regroup",
+        "parakeet_gap_split_ms": "qwen_parakeet_gap_split_ms",
+        "parakeet_max_cue_duration": "qwen_parakeet_max_cue_duration",
+        "parakeet_max_cue_chars": "qwen_parakeet_max_cue_chars",
+        "parakeet_min_cue_duration": "qwen_parakeet_min_cue_duration",
         "chunk_threshold": "qwen_chunk_threshold",
         "generator_backend": "qwen_generator_backend",
         "vad_threshold": "qwen_vad_threshold",
@@ -1222,6 +1232,11 @@ def _build_pipeline(
             "stepdown_enabled": qwen_defaults.get("qwen_stepdown", True),
             "generator_backend": qwen_defaults.get("qwen_generator_backend", "qwen3"),
             "regroup_mode": qwen_defaults.get("qwen_regroup_mode", "standard"),
+            "parakeet_regroup": qwen_defaults.get("qwen_parakeet_regroup", False),
+            "parakeet_gap_split_ms": qwen_defaults.get("qwen_parakeet_gap_split_ms", 400.0),
+            "parakeet_max_cue_duration": qwen_defaults.get("qwen_parakeet_max_cue_duration", 6.0),
+            "parakeet_max_cue_chars": qwen_defaults.get("qwen_parakeet_max_cue_chars", 30),
+            "parakeet_min_cue_duration": qwen_defaults.get("qwen_parakeet_min_cue_duration", 0.5),
             "segmenter_config": segmenter_config if segmenter_config else None,
         }
         # When anime-whisper generator is selected, override model defaults
@@ -1257,6 +1272,18 @@ def _build_pipeline(
                 qwen_pipeline_params["segmenter_chunk_threshold"] = 1.0
             if "max_group_duration" not in _user_qwen:
                 qwen_pipeline_params["segmenter_max_group_duration"] = 6.0
+        elif _gen_backend == "parakeet":
+            # Parakeet supplies native CTC timestamps. Keep the generated
+            # text unchanged and never instantiate the Qwen ForcedAligner.
+            _user_qwen = pass_config.get("qwen_params") or {}
+            if "model_id" not in _user_qwen and not pass_config.get("model"):
+                qwen_pipeline_params["model_id"] = "grider-transwithai/parakeet-ctc-1.1b-ja"
+            if "assembly_cleaner" not in _user_qwen:
+                qwen_pipeline_params["assembly_cleaner"] = False
+            if "stepdown" not in _user_qwen:
+                qwen_pipeline_params["stepdown_enabled"] = False
+            if "regroup_mode" not in _user_qwen:
+                qwen_pipeline_params["regroup_mode"] = "standard"
         # Pipeline-owned defaults: only forward when ensemble config explicitly overrides
         if "qwen_scene_min_duration" in qwen_defaults:
             qwen_pipeline_params["scene_min_duration"] = qwen_defaults["qwen_scene_min_duration"]

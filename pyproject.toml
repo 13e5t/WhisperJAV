@@ -255,6 +255,17 @@ qwen = [
     "whisperjav[huggingface]",  # Transformers/torch dependency
 ]
 
+# Parakeet CTC Japanese support (optional NeMo runtime)
+# Install with: pip install whisperjav[parakeet]
+# NeMo is intentionally not part of [all] because it is a large ASR stack.
+parakeet = [
+    # The Japanese Parakeet checkpoint's model card pins this NeMo runtime.
+    # Keep the pin here so `pip install whisperjav[parakeet]` cannot silently
+    # resolve a newer, incompatible NeMo API.
+    "nemo-toolkit==2.0.0rc0",
+    "nemo-toolkit[asr]==2.0.0rc0",
+]
+
 # Analysis and visualization tools
 # Install with: pip install whisperjav[analysis]
 # Note: scikit-learn is in [cli] for scene detection clustering

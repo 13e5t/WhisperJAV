@@ -506,9 +506,10 @@ def parse_arguments():
     # ── Qwen3-ASR: Model ────────────────────────────────────────────────
     qwen_model_group = parser.add_argument_group("Qwen3-ASR: Model")
     qwen_model_group.add_argument("--qwen-generator", type=str, default="qwen3",
-                           choices=["qwen3", "anime-whisper"],
+                           choices=["qwen3", "anime-whisper", "parakeet"],
                            help="Text generator backend (default: qwen3). "
-                                "anime-whisper uses litagin/anime-whisper for anime/VN dialogue")
+                                "anime-whisper uses litagin/anime-whisper for anime/VN dialogue; "
+                                "parakeet uses native NeMo CTC timestamps")
     qwen_model_group.add_argument("--qwen-model-id", type=str,
                            default="Qwen/Qwen3-ASR-1.7B",
                            help="Qwen3-ASR model ID (default: Qwen/Qwen3-ASR-1.7B)")
@@ -629,6 +630,16 @@ def parse_arguments():
                            choices=["standard", "sentence_only", "off"],
                            help="Subtitle regrouping mode: 'off' (frame-native, one subtitle per frame), "
                                 "'standard' (full REGROUP_JAV), 'sentence_only' (punctuation + caps only)")
+    qwen_output_group.add_argument("--parakeet-regroup", action="store_true", default=False,
+                           help="Enable Parakeet-native Japanese cue regrouping (Parakeet only)")
+    qwen_output_group.add_argument("--parakeet-gap-split-ms", type=float, default=400.0,
+                           help="Parakeet native cue gap split threshold in milliseconds (default: 400)")
+    qwen_output_group.add_argument("--parakeet-max-cue-duration", type=float, default=6.0,
+                           help="Parakeet native maximum cue duration in seconds (default: 6.0)")
+    qwen_output_group.add_argument("--parakeet-max-cue-chars", type=int, default=30,
+                           help="Parakeet native maximum Japanese cue length (default: 30)")
+    qwen_output_group.add_argument("--parakeet-min-cue-duration", type=float, default=0.5,
+                           help="Parakeet native minimum cue duration used for conservative repair (default: 0.5)")
     qwen_output_group.add_argument("--qwen-postprocess-preset", type=str, default="high_moan",
                            choices=["default", "high_moan", "narrative"],
                            help="Subtitle regrouping preset (default: high_moan for JAV)")
@@ -1178,6 +1189,12 @@ def process_files_sync(media_files: List[Dict], args: argparse.Namespace, resolv
             "postprocess_preset": getattr(args, 'qwen_postprocess_preset', 'high_moan'),
             # Subtitle regrouping (O1)
             "regroup_mode": getattr(args, 'qwen_regroup', 'standard'),
+            # Parakeet-native Japanese cue regrouping (opt-in)
+            "parakeet_regroup": getattr(args, 'parakeet_regroup', False),
+            "parakeet_gap_split_ms": getattr(args, 'parakeet_gap_split_ms', 400.0),
+            "parakeet_max_cue_duration": getattr(args, 'parakeet_max_cue_duration', 6.0),
+            "parakeet_max_cue_chars": getattr(args, 'parakeet_max_cue_chars', 30),
+            "parakeet_min_cue_duration": getattr(args, 'parakeet_min_cue_duration', 0.5),
             # Temporal framing for assembly mode (GAP-5)
             "qwen_framer": getattr(args, 'qwen_framer', 'vad-grouped'),
             "framer_srt_path": getattr(args, 'qwen_framer_srt_path', None),
@@ -1222,6 +1239,15 @@ def process_files_sync(media_files: List[Dict], args: argparse.Namespace, resolv
                 qwen_kwargs["segmenter_chunk_threshold"] = 0.5
             if not any(a.startswith('--qwen-max-group-duration') for a in sys.argv):
                 qwen_kwargs["segmenter_max_group_duration"] = 5.0
+        elif _gen_backend == "parakeet":
+            if not any(a.startswith('--qwen-model-id') for a in sys.argv):
+                qwen_kwargs["model_id"] = "grider-transwithai/parakeet-ctc-1.1b-ja"
+            if not any(a.startswith('--qwen-assembly-cleaner') for a in sys.argv):
+                qwen_kwargs["assembly_cleaner"] = False
+            if not any(a.startswith('--qwen-stepdown') for a in sys.argv):
+                qwen_kwargs["stepdown_enabled"] = False
+            if not any(a.startswith('--qwen-regroup') for a in sys.argv):
+                qwen_kwargs["regroup_mode"] = "standard"
 
         pipeline = QwenPipeline(**qwen_kwargs)
         effective_mode = args.mode

@@ -74,11 +74,18 @@ class FramingResult:
 
 @dataclass
 class TranscriptionResult:
-    """Output of a TextGenerator for a single audio segment."""
+    """Output of a TextGenerator for a single audio segment.
+
+    ``words`` is optional native timing information produced by generators
+    such as Parakeet.  The entries are relative to the audio segment passed
+    to the generator.  Text-only generators leave it empty and continue to
+    use the existing aligner or framer fallback path.
+    """
 
     text: str
     language: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    words: list[WordTimestamp] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -229,4 +236,5 @@ class SceneDiagnostics:
     stepdown: Optional[dict] = None  # {"attempted": bool, "enabled": bool, "improved": bool}
     vad_regions: Optional[list] = None
     group_details: Optional[list] = None
+    native_regroup: Optional[dict] = None
     error: Optional[str] = None

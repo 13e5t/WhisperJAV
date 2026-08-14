@@ -354,8 +354,13 @@ class DecoupledPipeline(BasePipeline):
         # TextCleaner
         cleaner = TextCleanerFactory.create(self.cleaner_backend, **self.cleaner_config)
 
-        # TextAligner (may be "none" for aligner-free workflows)
-        aligner = TextAlignerFactory.create(self.aligner_backend, **self.aligner_config)
+        # TextAligner (may be "none" for aligner-free workflows).  Keep the
+        # protocol's Optional[TextAligner] contract intact so generators that
+        # return native timestamps can reach the orchestrator's native path.
+        aligner = None if self.aligner_backend == "none" else TextAlignerFactory.create(
+            self.aligner_backend,
+            **self.aligner_config,
+        )
 
         from whisperjav.modules.subtitle_pipeline.types import StepDownConfig
 
