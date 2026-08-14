@@ -15,19 +15,24 @@ install the project extra:
 sudo apt-get update
 sudo apt-get install -y ffmpeg libsndfile1 build-essential git
 
-python3.10 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
+python3.10 -m venv /opt/whisperjav-venv
+source /opt/whisperjav-venv/bin/activate
+python -m pip install --upgrade pip wheel
+python -m pip install "setuptools==80.9.0"
 python -m pip install torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 \
   --index-url https://download.pytorch.org/whl/cu121
+python -m pip install \
+  "datasets==2.20.0" "fsspec==2024.5.0" \
+  "huggingface-hub==0.23.5" "pytorch-lightning==2.2.1"
 python -m pip install "nemo-toolkit==2.0.0rc0" "nemo-toolkit[asr]==2.0.0rc0"
 python -m pip install -e ".[cli,parakeet]"
 ```
 
-The repository's `[parakeet]` extra is pinned to the same NeMo version, so
-`python -m pip install -e ".[cli,parakeet]"` is reproducible for this
-checkpoint. Do not use `uv sync --locked` for this bring-your-own
-PyTorch/CUDA stack.
+The repository's `[parakeet]` extra pins the NeMo-compatible Hugging Face,
+Lightning, datasets, fsspec, and setuptools versions as well as the NeMo
+runtime. Keep the venv on local disk when `/workspace` is an MFS mount; this
+avoids very slow extraction of the PyTorch wheel. Do not use `uv sync --locked`
+for this bring-your-own PyTorch/CUDA stack.
 
 The default checkpoint is
 `grider-transwithai/parakeet-ctc-1.1b-ja`. A Hugging Face model ID or a local

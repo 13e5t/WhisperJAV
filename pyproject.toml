@@ -262,8 +262,15 @@ parakeet = [
     # The Japanese Parakeet checkpoint's model card pins this NeMo runtime.
     # Keep the pin here so `pip install whisperjav[parakeet]` cannot silently
     # resolve a newer, incompatible NeMo API.
+    # NeMo 2.0.0rc0 imports APIs removed by the current Hugging Face and
+    # PyTorch Lightning releases; keep the tested compatibility set together.
+    "datasets==2.20.0",
+    "fsspec==2024.5.0",
+    "huggingface-hub==0.23.5",
     "nemo-toolkit==2.0.0rc0",
     "nemo-toolkit[asr]==2.0.0rc0",
+    "pytorch-lightning==2.2.1",
+    "setuptools==80.9.0",
 ]
 
 # Analysis and visualization tools
