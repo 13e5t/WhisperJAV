@@ -364,6 +364,8 @@ class ParakeetTextGenerator:
             ]
             if not configured_fields:
                 return False
+            if "compute_timestamps" not in configured_fields:
+                return False
 
             change_decoding_strategy(configured_cfg)
             logger.debug(

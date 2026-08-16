@@ -883,8 +883,13 @@ class DecoupledSubtitlePipeline:
                 # normal frame→scene offset is applied later.
                 fallback_frames += 1
                 fallback_words = split_frame_to_words(text, 0.0, frame.duration)
+                source = (
+                    "frame_fallback"
+                    if len(fallback_words) <= 1
+                    else "synthetic_proportional"
+                )
                 for word in fallback_words:
-                    word["source"] = "frame_fallback"
+                    word["source"] = source
                 frame_alignments.append(fallback_words)
 
             scene_alignments.append(frame_alignments)

@@ -81,6 +81,27 @@ class PublicStrategyNeMoModel(FakeNeMoModel):
         self.change_decoding_strategy_calls.append(decoding_cfg)
 
 
+class ComputeTimestampRejectingConfig(SimpleNamespace):
+    """Config shape where NeMo rejects the timestamp-enabling field."""
+
+    def __setattr__(self, name, value):
+        if name == "compute_timestamps":
+            raise TypeError("compute_timestamps is not supported")
+        super().__setattr__(name, value)
+
+
+class PublicStrategyWithoutComputeTimestampsModel(PublicStrategyNeMoModel):
+    """Public strategy API must not count partial timestamp setup as success."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cfg.decoding = ComputeTimestampRejectingConfig(
+            preserve_alignments=False,
+            ctc_timestamp_type="char",
+        )
+        self.decoding = SimpleNamespace(cfg={}, compute_timestamps=False)
+
+
 class RaisingPublicStrategyNeMoModel(PublicStrategyNeMoModel):
     """Public API failure should fall back to the legacy decoder flags."""
 
@@ -259,6 +280,22 @@ class TestParakeetInference:
         generator.load()
 
         assert len(model.change_decoding_strategy_calls) == 1
+        assert model.decoding.compute_timestamps is True
+        assert model.decoding.cfg["ctc_timestamp_type"] == "all"
+
+    def test_public_decoding_strategy_requires_compute_timestamps(self, monkeypatch):
+        from whisperjav.modules.subtitle_pipeline.generators.parakeet import (
+            ParakeetTextGenerator,
+        )
+
+        model = PublicStrategyWithoutComputeTimestampsModel()
+        _install_fake_nemo(monkeypatch, model)
+        _force_cpu(monkeypatch)
+
+        generator = ParakeetTextGenerator()
+        generator.load()
+
+        assert model.change_decoding_strategy_calls == []
         assert model.decoding.compute_timestamps is True
         assert model.decoding.cfg["ctc_timestamp_type"] == "all"
 
@@ -566,6 +603,28 @@ class TestParakeetLifecycleAndPipelineBridge:
         assert alignments[0][1][0]["start"] == pytest.approx(0.0)
         assert alignments[0][1][0]["end"] == pytest.approx(2.0)
         assert alignments[0][1][0]["source"] == "frame_fallback"
+
+    def test_multi_chunk_frame_fallback_is_marked_proportional(self):
+        from whisperjav.modules.subtitle_pipeline.orchestrator import (
+            DecoupledSubtitlePipeline,
+        )
+        from whisperjav.modules.subtitle_pipeline.types import TemporalFrame
+
+        frames = [[TemporalFrame(0.0, 2.0), TemporalFrame(3.0, 4.0)]]
+        texts = [["一つ。二つ。", "ネイティブ"]]
+        native = [[
+            None,
+            [{"word": "ネイティブ", "start": 0.1, "end": 0.2, "source": "native_ctc"}],
+        ]]
+
+        alignments = DecoupledSubtitlePipeline._native_or_frame_fallback(
+            frames, texts, native,
+        )
+
+        fallback_words = alignments[0][0]
+        assert len(fallback_words) == 2
+        assert all(word["source"] == "synthetic_proportional" for word in fallback_words)
+        assert alignments[0][1][0]["source"] == "native_ctc"
 
     def test_orchestrator_rejects_generator_marked_malformed_native_timing(self):
         from whisperjav.modules.subtitle_pipeline.orchestrator import (
