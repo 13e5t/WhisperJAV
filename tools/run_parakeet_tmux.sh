@@ -28,8 +28,12 @@ get_package_version() {
 
 runtime_imports_ok() {
     "${VENV_PYTHON}" -c \
-        'import nemo, pytorch_lightning, stable_whisper, ten_vad, torch, torchvision; assert torch.cuda.is_available()' \
-        >/dev/null 2>&1
+        'import nemo, pytorch_lightning, stable_whisper, torch, torchvision; assert torch.cuda.is_available()' \
+        >/dev/null 2>&1 || return 1
+
+    if [[ "${requested_framer}" == "vad-grouped" && "${requested_segmenter}" == "ten" ]]; then
+        "${VENV_PYTHON}" -c 'import ten_vad' >/dev/null 2>&1 || return 1
+    fi
 }
 
 ensure_virtualenv() {
@@ -57,7 +61,7 @@ ensure_virtualenv() {
 }
 
 ensure_libcxx_runtime() {
-    if [[ "${requested_segmenter}" != "ten" ]]; then
+    if [[ "${requested_framer}" != "vad-grouped" || "${requested_segmenter}" != "ten" ]]; then
         return
     fi
 
@@ -160,6 +164,7 @@ ensure_onnxruntime_gpu() {
     "onnxruntime-gpu==${ONNXRUNTIME_GPU_VERSION}"
 }
 
+requested_framer="full-scene"
 requested_segmenter="ten"
 for ((arg_index = 1; arg_index <= $#; arg_index++)); do
     arg="${!arg_index}"
@@ -171,6 +176,15 @@ for ((arg_index = 1; arg_index <= $#; arg_index++)); do
             next_index=$((arg_index + 1))
             if ((next_index <= $#)); then
                 requested_segmenter="${!next_index}"
+            fi
+            ;;
+        --qwen-framer=*)
+            requested_framer="${arg#*=}"
+            ;;
+        --qwen-framer)
+            next_index=$((arg_index + 1))
+            if ((next_index <= $#)); then
+                requested_framer="${!next_index}"
             fi
             ;;
     esac
@@ -186,10 +200,10 @@ ensure_virtualenv
 ensure_libcxx_runtime
 ensure_project_dependencies
 
-if [[ "${requested_segmenter}" == "whisperseg" ]]; then
+if [[ "${requested_framer}" == "vad-grouped" && "${requested_segmenter}" == "whisperseg" ]]; then
     ensure_onnxruntime_gpu
 else
-    echo "Skipping ONNX Runtime setup for segmenter: ${requested_segmenter}"
+    echo "Skipping ONNX Runtime setup for framer/segmenter: ${requested_framer}/${requested_segmenter}"
 fi
 
 # If called from inside tmux, reuse the current session instead of nesting it.

@@ -77,6 +77,16 @@ def test_queue_defaults_to_ten_segmenter():
     assert build_parser().parse_args([]).qwen_segmenter == "ten"
 
 
+def test_queue_defaults_to_full_scene_framer():
+    assert build_parser().parse_args([]).qwen_framer == "full-scene"
+
+
+def test_queue_accepts_explicit_vad_grouped_framer():
+    args = build_parser().parse_args(["--qwen-framer", "vad-grouped"])
+
+    assert args.qwen_framer == "vad-grouped"
+
+
 def test_queue_command_uses_validated_baseline_parakeet_settings(tmp_path):
     args = Namespace(
         input_dir=tmp_path / "input",
@@ -91,8 +101,23 @@ def test_queue_command_uses_validated_baseline_parakeet_settings(tmp_path):
     assert "--mode" in command and command[command.index("--mode") + 1] == "qwen"
     assert "--qwen-generator" in command and command[command.index("--qwen-generator") + 1] == "parakeet"
     assert "--qwen-segmenter" in command and command[command.index("--qwen-segmenter") + 1] == "ten"
-    assert "--qwen-framer" in command and command[command.index("--qwen-framer") + 1] == "vad-grouped"
+    assert "--qwen-framer" in command and command[command.index("--qwen-framer") + 1] == "full-scene"
     assert "--qwen-regroup" in command and command[command.index("--qwen-regroup") + 1] == "off"
     assert "--parakeet-regroup" in command
     assert "--qwen-dtype" in command and command[command.index("--qwen-dtype") + 1] == "float16"
     assert "--pass1-qwen-params" not in command
+
+
+def test_queue_command_preserves_explicit_vad_grouped_ab_path(tmp_path):
+    args = Namespace(
+        input_dir=tmp_path / "input",
+        output_dir=tmp_path / "output",
+        temp_dir=tmp_path / "temp",
+        qwen_framer="vad-grouped",
+        keep_temp=False,
+        debug=False,
+    )
+
+    command = build_command(args)
+
+    assert command[command.index("--qwen-framer") + 1] == "vad-grouped"

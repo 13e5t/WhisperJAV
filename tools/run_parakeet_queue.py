@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Run the baseline Japanese Parakeet pipeline against a reusable file queue.
+"""Run Japanese Parakeet against a reusable file queue.
 
 The queue is a directory, not a second transcription architecture:
 WhisperJAV receives the directory in one invocation and uses the final SRT/VTT
-as the completion marker. The existing Parakeet generator lifecycle remains
-unchanged and loads/unloads its GPU model per input file.
+as the completion marker. The dedicated Parakeet runner defaults to the
+long-context full-scene framer; the legacy TEN/VAD grouping remains available
+for A/B comparison.
 """
 
 from __future__ import annotations
@@ -44,7 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["none", "silero", "silero-v4.0", "silero-v3.1", "silero-v6.2",
                  "nemo", "nemo-lite", "whisper-vad", "ten", "whisperseg"],
         default="ten",
-        help="Speech segmentation backend for VAD-based chunking (default: ten).",
+        help="Speech segmentation backend for --qwen-framer vad-grouped (default: ten).",
+    )
+    parser.add_argument(
+        "--qwen-framer",
+        choices=["full-scene", "vad-grouped"],
+        default="full-scene",
+        help="Temporal framing mode (default: full-scene).",
     )
     parser.add_argument("--watch", action="store_true",
                         help="Keep polling for newly added files after each batch.")
@@ -135,7 +142,7 @@ def build_command(args: argparse.Namespace) -> List[str]:
         "--qwen-segmenter",
         getattr(args, "qwen_segmenter", "ten"),
         "--qwen-framer",
-        "vad-grouped",
+        getattr(args, "qwen_framer", "full-scene"),
         "--qwen-model-id",
         MODEL_ID,
         "--device",

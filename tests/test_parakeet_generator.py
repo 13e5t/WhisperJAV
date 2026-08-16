@@ -675,6 +675,7 @@ class TestParakeetLifecycleAndPipelineBridge:
             temp_dir=str(tmp_path / "tmp"),
             generator_backend="parakeet",
             qwen_framer="full-scene",
+            parakeet_regroup=True,
             scene_detector="none",
         )
 
@@ -683,9 +684,34 @@ class TestParakeetLifecycleAndPipelineBridge:
         assert generator._config["model_id"] == (
             "grider-transwithai/parakeet-ctc-1.1b-ja"
         )
+        assert generator._config["timestamp_level"] == "char"
+        assert pipeline.framer_backend == "full-scene"
+        assert pipeline._should_run_phase4_segmentation() is False
+        assert pipeline._subtitle_pipeline.framer.__class__.__name__ == "FullSceneFramer"
         assert pipeline._subtitle_pipeline.aligner is None
+        assert pipeline._subtitle_pipeline.cleaner.__class__.__name__ == "PassthroughCleaner"
+        assert pipeline._subtitle_pipeline.native_regrouper is not None
         assert pipeline.assembly_cleaner_enabled is False
         assert pipeline.stepdown_enabled is False
+
+    def test_explicit_vad_grouped_parakeet_keeps_ten_framer_path(self, tmp_path):
+        try:
+            from whisperjav.pipelines.qwen_pipeline import QwenPipeline
+        except ModuleNotFoundError as exc:
+            pytest.skip(f"Qwen pipeline dependency is not installed: {exc.name}")
+
+        pipeline = QwenPipeline(
+            output_dir=str(tmp_path / "out"),
+            temp_dir=str(tmp_path / "tmp"),
+            generator_backend="parakeet",
+            qwen_framer="vad-grouped",
+            speech_segmenter="ten",
+            scene_detector="none",
+        )
+
+        assert pipeline._should_run_phase4_segmentation() is True
+        assert pipeline._subtitle_pipeline.framer.__class__.__name__ == "VadGroupedFramer"
+        assert pipeline._subtitle_pipeline.framer._backend == "ten"
 
     @pytest.mark.parametrize("backend", ["qwen3", "anime-whisper"])
     def test_native_regroup_request_is_ignored_by_other_backends(self, backend, tmp_path):

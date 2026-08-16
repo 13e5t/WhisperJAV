@@ -128,6 +128,36 @@ class DecoupledSubtitlePipeline:
         # Temp files for cleanup
         self._temp_files: list[Path] = []
 
+    @staticmethod
+    def _is_parakeet_generator(generator: Any) -> bool:
+        """Identify the Parakeet generator without importing its optional runtime."""
+        return (
+            generator.__class__.__name__ == "ParakeetTextGenerator"
+            or getattr(generator, "backend_name", None) == "parakeet"
+        )
+
+    def _log_parakeet_native_timing(
+        self,
+        result: Any,
+        native_words: Optional[list[dict[str, Any]]],
+        scene_idx: int,
+        frame_idx: int,
+    ) -> None:
+        """Emit compact diagnostics proving native timing survived generation."""
+        metadata = getattr(result, "metadata", {}) or {}
+        if not (
+            self._is_parakeet_generator(self.generator)
+            or metadata.get("generator") == "parakeet"
+        ):
+            return
+        logger.debug(
+            "Parakeet native timing: %s; Native units: %d (scene=%d frame=%d)",
+            metadata.get("timing_source", "unavailable"),
+            len(native_words or []),
+            scene_idx,
+            frame_idx,
+        )
+
     def process_scenes(
         self,
         scene_audio_paths: list[Path],
@@ -392,6 +422,19 @@ class DecoupledSubtitlePipeline:
             frames = framing_result.frames
             scene_frames.append(frames)
 
+            if self._is_parakeet_generator(self.generator):
+                logger.debug(
+                    "Parakeet framing: %s",
+                    framing_result.metadata.get(
+                        "strategy",
+                        frames[0].source if frames else "none",
+                    ),
+                )
+                logger.debug(
+                    "Parakeet scene duration: %.2fs",
+                    scene_durations[scene_idx],
+                )
+
             # Extract speech regions from framer metadata (VadGroupedFramer provides these)
             regions = framing_result.metadata.get("speech_regions")
             frame_speech_regions.append(regions)
@@ -520,6 +563,12 @@ class DecoupledSubtitlePipeline:
                             result = gen_results[i] if i < len(gen_results) else None
                             raw_texts[gen_idx] = getattr(result, "text", "") if result is not None else ""
                             raw_native_words[gen_idx] = self._extract_native_words(result)
+                            self._log_parakeet_native_timing(
+                                result,
+                                raw_native_words[gen_idx],
+                                scene_idx,
+                                gen_idx,
+                            )
                     except Exception:
                         # Batch failed — fall back to per-frame
                         logger.warning(
@@ -536,6 +585,12 @@ class DecoupledSubtitlePipeline:
                                 )
                                 raw_texts[gen_idx] = getattr(result, "text", "")
                                 raw_native_words[gen_idx] = self._extract_native_words(result)
+                                self._log_parakeet_native_timing(
+                                    result,
+                                    raw_native_words[gen_idx],
+                                    scene_idx,
+                                    gen_idx,
+                                )
                             except Exception:
                                 logger.error(
                                     "[DecoupledPipeline] Generation failed for scene %d frame %d",

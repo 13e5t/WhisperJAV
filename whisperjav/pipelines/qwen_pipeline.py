@@ -401,6 +401,22 @@ class QwenPipeline(BasePipeline):
     def get_mode_name(self) -> str:
         return "qwen"
 
+    def _should_run_phase4_segmentation(self) -> bool:
+        """Return whether Phase 4 should run a speech segmenter.
+
+        The dedicated long-context Parakeet path already has a full-scene
+        temporal framer. Running TEN (or another VAD backend) before that
+        framer would recreate the short-frame recall loss this mode is meant
+        to measure. Keep Phase 4 unchanged for every other backend/framer
+        combination, including explicit Parakeet ``vad-grouped`` A/B runs.
+        """
+        if self.segmenter_backend == "none":
+            return False
+        return not (
+            self.generator_backend == "parakeet"
+            and self.framer_backend == "full-scene"
+        )
+
     # ------------------------------------------------------------------
     # Context resolution
     # ------------------------------------------------------------------
@@ -446,7 +462,9 @@ class QwenPipeline(BasePipeline):
 
         cfg = self._asr_config
 
-        # TemporalFramer: selected by --qwen-framer (default: full-scene)
+        # TemporalFramer: selected by --qwen-framer. The dedicated Parakeet
+        # queue runner supplies full-scene by default; the shared pipeline
+        # keeps its legacy default for backward compatibility.
         framer_kwargs = {}
         if self.framer_backend == "vad-grouped":
             framer_kwargs = {
@@ -814,7 +832,7 @@ class QwenPipeline(BasePipeline):
         # ==============================================================
         speech_regions_per_scene = {}  # scene_idx -> SegmentationResult
 
-        if self.segmenter_backend != "none":
+        if self._should_run_phase4_segmentation():
             logger.info("[QwenPipeline PID %s] Phase 4: Speech segmentation (backend=%s)", os.getpid(), self.segmenter_backend)
             phase4_start = time.time()
 
@@ -854,7 +872,14 @@ class QwenPipeline(BasePipeline):
             }
             logger.info("[QwenPipeline PID %s] Phase 4: Complete (%.1fs)", os.getpid(), time.time() - phase4_start)
         else:
-            logger.info("[QwenPipeline PID %s] Phase 4: Skipped (segmenter=none)", os.getpid())
+            if self.generator_backend == "parakeet" and self.framer_backend == "full-scene":
+                logger.info(
+                    "[QwenPipeline PID %s] Phase 4: Skipped (Parakeet full-scene; "
+                    "temporal framer does not use segmenter)",
+                    os.getpid(),
+                )
+            else:
+                logger.info("[QwenPipeline PID %s] Phase 4: Skipped (segmenter=none)", os.getpid())
 
         # ==============================================================
         # PHASE 5: ASR TRANSCRIPTION (VRAM Block 2)
