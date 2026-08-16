@@ -6,15 +6,18 @@ importing WhisperJAV therefore does not require the optional NeMo runtime.
 The NeMo ASR API loads Hugging Face checkpoints with
 ``ASRModel.from_pretrained(model_name=...)`` and local ``.nemo`` files with
 ``ASRModel.restore_from(restore_path=...)``.  Newer releases accept
-``transcribe(..., return_hypotheses=True, timestamps=True)``; the pinned
-Japanese checkpoint runtime enables the same native CTC timing through
+``transcribe(..., return_hypotheses=True, timestamps=True)`` and the public
+``model.change_decoding_strategy(...)`` API; the pinned Japanese checkpoint
+runtime enables the same native CTC timing through
 ``model.decoding.compute_timestamps`` and returns it under ``Hypothesis.timestep``.
 """
 
 from __future__ import annotations
 
+import copy
 import inspect
 import math
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -302,9 +305,85 @@ class ParakeetTextGenerator:
         )
         return "timestamps" not in parameter_names and not accepts_kwargs
 
-    def _configure_native_timestamps(self) -> bool:
-        """Enable legacy NeMo CTC timestamp generation when available."""
-        if self._model is None or self._config["timestamp_level"] == "none":
+    @staticmethod
+    def _model_decoding_config(model: Any) -> Any:
+        """Return ``model.cfg.decoding`` across NeMo config representations."""
+        model_cfg = getattr(model, "cfg", None)
+        if isinstance(model_cfg, Mapping):
+            return model_cfg.get("decoding")
+        return getattr(model_cfg, "decoding", None)
+
+    @staticmethod
+    def _set_decoding_config_field(config: Any, name: str, value: Any) -> bool:
+        """Set a decoding option when the active NeMo config permits it."""
+        try:
+            config[name] = value
+            return True
+        except (AttributeError, KeyError, TypeError, ValueError, RuntimeError):
+            try:
+                setattr(config, name, value)
+                return True
+            except (AttributeError, KeyError, TypeError, ValueError, RuntimeError):
+                return False
+
+    def _configure_public_native_timestamps(self) -> bool:
+        """Configure CTC timestamps through NeMo's public strategy API."""
+        if self._model is None:
+            return False
+
+        change_decoding_strategy = getattr(
+            self._model,
+            "change_decoding_strategy",
+            None,
+        )
+        if not callable(change_decoding_strategy):
+            return False
+
+        decoding_cfg = self._model_decoding_config(self._model)
+        if decoding_cfg is None:
+            return False
+
+        try:
+            # NeMo expects a config object compatible with model.cfg.decoding.
+            # Work on a copy where possible so a failed public-API attempt does
+            # not partially mutate the model's source configuration before the
+            # legacy fallback gets a chance to run.
+            try:
+                configured_cfg = copy.deepcopy(decoding_cfg)
+            except Exception:
+                configured_cfg = decoding_cfg
+
+            configured_fields = [
+                field
+                for field, value in (
+                    ("preserve_alignments", True),
+                    ("compute_timestamps", True),
+                    ("ctc_timestamp_type", "all"),
+                )
+                if self._set_decoding_config_field(configured_cfg, field, value)
+            ]
+            if not configured_fields:
+                return False
+
+            change_decoding_strategy(configured_cfg)
+            logger.debug(
+                "[ParakeetTextGenerator] Enabled public NeMo CTC timestamps (%s)",
+                ", ".join(configured_fields),
+            )
+            return True
+        except Exception as exc:
+            # NeMo versions/checkpoints differ in both config shape and public
+            # method support. Keep this path best-effort and use the pinned
+            # runtime's decoder configuration when it cannot be applied.
+            logger.debug(
+                "[ParakeetTextGenerator] Public NeMo timestamp setup unavailable: %s",
+                exc,
+            )
+            return False
+
+    def _configure_legacy_native_timestamps(self) -> bool:
+        """Enable the legacy NeMo decoder timestamp flags when available."""
+        if self._model is None:
             return False
 
         decoding = getattr(self._model, "decoding", None)
@@ -328,6 +407,15 @@ class ParakeetTextGenerator:
                 exc,
             )
             return False
+
+    def _configure_native_timestamps(self) -> bool:
+        """Prefer public NeMo timestamp setup, then use the legacy fallback."""
+        if self._model is None or self._config["timestamp_level"] == "none":
+            return False
+
+        if self._configure_public_native_timestamps():
+            return True
+        return self._configure_legacy_native_timestamps()
 
     def unload(self) -> None:
         """Release the NeMo model and clear CUDA allocations."""
@@ -374,6 +462,7 @@ class ParakeetTextGenerator:
                 "generator": "parakeet",
                 "audio_path": str(audio_path),
                 "timestamp_status": "unavailable",
+                "timing_source": "frame_fallback_required",
             },
         )
 
@@ -453,12 +542,19 @@ class ParakeetTextGenerator:
             words, resolved_level, invalid_timestamp_count = self._extract_timestamps(output)
             if not timestamp_enabled:
                 timestamp_status = "disabled"
-            elif words and invalid_timestamp_count == 0:
-                timestamp_status = "native"
-            elif words:
+                timing_source = "disabled"
+            elif invalid_timestamp_count > 0:
+                # Any malformed record invalidates the whole frame for native
+                # timing. The orchestrator will use its complete parent-frame
+                # fallback rather than mixing partial native and synthetic data.
                 timestamp_status = "malformed"
+                timing_source = "native_ctc_malformed"
+            elif words:
+                timestamp_status = "native"
+                timing_source = "native_ctc"
             else:
                 timestamp_status = "unavailable"
+                timing_source = "frame_fallback_required"
 
             results.append(
                 TranscriptionResult(
@@ -474,6 +570,7 @@ class ParakeetTextGenerator:
                         "native_timestamp_count": len(words),
                         "native_timestamp_invalid_count": invalid_timestamp_count,
                         "timestamp_request_fallback": timestamp_request_fallback,
+                        "timing_source": timing_source,
                     },
                 )
             )

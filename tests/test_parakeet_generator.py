@@ -65,6 +65,34 @@ class LegacySignatureNeMoModel(FakeNeMoModel):
         return self.outputs
 
 
+class PublicStrategyNeMoModel(FakeNeMoModel):
+    """NeMo model exposing the public decoding-strategy API."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cfg.decoding = {
+            "preserve_alignments": False,
+            "compute_timestamps": False,
+            "ctc_timestamp_type": "char",
+        }
+        self.change_decoding_strategy_calls = []
+
+    def change_decoding_strategy(self, decoding_cfg):
+        self.change_decoding_strategy_calls.append(decoding_cfg)
+
+
+class RaisingPublicStrategyNeMoModel(PublicStrategyNeMoModel):
+    """Public API failure should fall back to the legacy decoder flags."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.decoding = SimpleNamespace(cfg={}, compute_timestamps=False)
+
+    def change_decoding_strategy(self, decoding_cfg):
+        self.change_decoding_strategy_calls.append(decoding_cfg)
+        raise RuntimeError("decoder config is incompatible with this NeMo runtime")
+
+
 def _install_fake_nemo(monkeypatch, model):
     """Install enough package structure for ``import nemo.collections.asr``."""
     nemo = types.ModuleType("nemo")
@@ -196,6 +224,43 @@ class TestParakeetInference:
             ("ん", 0.20, 0.40),
         ]
         assert results[0].metadata["timestamp_status"] == "native"
+        assert results[0].metadata["timing_source"] == "native_ctc"
+
+    def test_public_decoding_strategy_api_configures_native_timestamps(
+        self, monkeypatch
+    ):
+        from whisperjav.modules.subtitle_pipeline.generators.parakeet import (
+            ParakeetTextGenerator,
+        )
+
+        model = PublicStrategyNeMoModel()
+        _install_fake_nemo(monkeypatch, model)
+        _force_cpu(monkeypatch)
+
+        generator = ParakeetTextGenerator()
+        generator.load()
+
+        assert len(model.change_decoding_strategy_calls) == 1
+        configured = model.change_decoding_strategy_calls[0]
+        assert configured["preserve_alignments"] is True
+        assert configured["compute_timestamps"] is True
+        assert configured["ctc_timestamp_type"] == "all"
+
+    def test_public_decoding_strategy_failure_uses_legacy_setup(self, monkeypatch):
+        from whisperjav.modules.subtitle_pipeline.generators.parakeet import (
+            ParakeetTextGenerator,
+        )
+
+        model = RaisingPublicStrategyNeMoModel()
+        _install_fake_nemo(monkeypatch, model)
+        _force_cpu(monkeypatch)
+
+        generator = ParakeetTextGenerator()
+        generator.load()
+
+        assert len(model.change_decoding_strategy_calls) == 1
+        assert model.decoding.compute_timestamps is True
+        assert model.decoding.cfg["ctc_timestamp_type"] == "all"
 
     def test_generate_is_a_single_item_batch_wrapper(self, monkeypatch, tmp_path):
         from whisperjav.modules.subtitle_pipeline.generators.parakeet import (
@@ -285,7 +350,7 @@ class TestParakeetInference:
         assert result.words[0].start == pytest.approx(0.8)
         assert result.words[0].end == pytest.approx(1.6)
 
-    def test_malformed_or_timestamp_less_outputs_are_explicitly_unavailable(
+    def test_missing_and_malformed_timestamp_provenance_is_explicit(
         self, monkeypatch, tmp_path
     ):
         from whisperjav.modules.subtitle_pipeline.generators.parakeet import (
@@ -312,7 +377,10 @@ class TestParakeetInference:
 
         assert [result.text for result in results] == ["音声", "壊れ"]
         assert all(result.words == [] for result in results)
-        assert all(result.metadata["timestamp_status"] == "unavailable" for result in results)
+        assert results[0].metadata["timestamp_status"] == "unavailable"
+        assert results[0].metadata["timing_source"] == "frame_fallback_required"
+        assert results[1].metadata["timestamp_status"] == "malformed"
+        assert results[1].metadata["timing_source"] == "native_ctc_malformed"
         assert results[1].metadata["native_timestamp_invalid_count"] == 1
 
     def test_partial_malformed_timestamps_are_reported(self, monkeypatch, tmp_path):
@@ -335,6 +403,7 @@ class TestParakeetInference:
 
         assert len(result.words) == 1
         assert result.metadata["timestamp_status"] == "malformed"
+        assert result.metadata["timing_source"] == "native_ctc_malformed"
         assert result.metadata["native_timestamp_invalid_count"] == 1
 
     def test_finer_malformed_level_falls_back_to_clean_lower_level(
@@ -362,6 +431,7 @@ class TestParakeetInference:
         ]
         assert result.metadata["timestamp_level"] == "word"
         assert result.metadata["native_timestamp_invalid_count"] == 0
+        assert result.metadata["timing_source"] == "native_ctc"
 
     def test_timestamp_none_skips_timestamp_request(self, monkeypatch, tmp_path):
         from whisperjav.modules.subtitle_pipeline.generators.parakeet import (
@@ -379,6 +449,7 @@ class TestParakeetInference:
         assert result.text == "テスト"
         assert result.words == []
         assert result.metadata["timestamp_status"] == "disabled"
+        assert result.metadata["timing_source"] == "disabled"
         assert "timestamps" not in model.transcribe_calls[0]
         assert "return_hypotheses" not in model.transcribe_calls[0]
 
@@ -398,6 +469,7 @@ class TestParakeetInference:
         assert result.text == "テキスト"
         assert result.words == []
         assert result.metadata["timestamp_status"] == "unavailable"
+        assert result.metadata["timing_source"] == "frame_fallback_required"
         assert result.metadata["timestamp_request_fallback"] is True
         assert len(model.transcribe_calls) == 2
         assert "timestamps" not in model.transcribe_calls[1]
@@ -433,6 +505,7 @@ class TestParakeetInference:
             ("声", 0.8, 1.6),
         ]
         assert result.metadata["timestamp_status"] == "native"
+        assert result.metadata["timing_source"] == "native_ctc"
         assert result.metadata["timestamp_request_fallback"] is True
         assert model.decoding.compute_timestamps is True
         assert model.decoding.cfg["ctc_timestamp_type"] == "all"
@@ -505,6 +578,20 @@ class TestParakeetLifecycleAndPipelineBridge:
         )
 
         assert DecoupledSubtitlePipeline._extract_native_words(result) is None
+
+    def test_orchestrator_preserves_native_ctc_provenance(self):
+        from whisperjav.modules.subtitle_pipeline.orchestrator import (
+            DecoupledSubtitlePipeline,
+        )
+
+        result = SimpleNamespace(
+            words=[SimpleNamespace(word="有効", start=0.1, end=0.2)],
+            metadata={"timing_source": "native_ctc"},
+        )
+
+        words = DecoupledSubtitlePipeline._extract_native_words(result)
+
+        assert words[0]["source"] == "native_ctc"
 
     def test_text_only_generators_keep_existing_branch_b_path(self):
         from whisperjav.modules.subtitle_pipeline.orchestrator import (

@@ -51,6 +51,31 @@ def test_one_speech_region_becomes_three_native_japanese_cues() -> None:
     assert diagnostics["cues_after_regroup"] == 3
 
 
+def test_native_ctc_source_is_treated_as_native_timing() -> None:
+    words = _units("これは", 0.0, 1.0, source="native_ctc")
+
+    groups, diagnostics = JapaneseNativeRegrouper().regroup_scene(
+        [words], [(0.0, 1.0)]
+    )
+
+    assert _texts(groups) == ["これは"]
+    assert diagnostics["native_timestamp_regions"] == 1
+    assert diagnostics["fallback_regions"] == 0
+
+
+def test_synthetic_proportional_source_is_not_native_timing() -> None:
+    words = _units("これは", 0.0, 1.0, source="synthetic_proportional")
+
+    groups, diagnostics = JapaneseNativeRegrouper().regroup_scene(
+        [words], [(0.0, 1.0)]
+    )
+
+    assert _texts(groups) == ["これは"]
+    assert groups[0][0]["source"] == "synthetic_proportional"
+    assert diagnostics["native_timestamp_regions"] == 0
+    assert diagnostics["fallback_regions"] == 1
+
+
 def test_punctuation_splits_without_a_large_gap() -> None:
     words = _units("これは。", 0.0, 1.0) + _units("次です！", 1.05, 2.0)
 

@@ -1149,17 +1149,28 @@ def _build_pipeline(
             if enhancer_model:
                 qwen_defaults["qwen_enhancer_model"] = enhancer_model
             logger.debug("Pass %s: Override qwen_enhancer = %s, model = %s", pass_number, enhancer_backend, enhancer_model)
-        # Apply speech segmenter override for qwen pipeline (post-ASR VAD filter)
-        if pass_config.get("speech_segmenter"):
-            qwen_defaults["qwen_segmenter"] = pass_config["speech_segmenter"]
-            logger.debug("Pass %s: Override qwen_segmenter = %s", pass_number, pass_config["speech_segmenter"])
-        # anime-whisper: v1.8.13 default flipped TEN -> WhisperSeg (must
-        # override BEFORE sensitivity resolution). Only fires when user did
-        # not pass --pass{N}-speech-segmenter.
+        # Apply speech segmenter override for qwen pipeline (post-ASR VAD filter).
+        # A non-empty value is an explicit pass-level choice; backend defaults
+        # below must never overwrite it.
+        _speech_segmenter = pass_config.get("speech_segmenter")
+        _segmenter_explicit = _speech_segmenter not in (None, "")
+        if _segmenter_explicit:
+            qwen_defaults["qwen_segmenter"] = _speech_segmenter
+            logger.debug("Pass %s: Override qwen_segmenter = %s", pass_number, _speech_segmenter)
+
+        # Resolve backend-specific defaults BEFORE sensitivity resolution so
+        # the selected backend's preset is loaded. Parakeet favours recall
+        # for Japanese subtitle extraction and therefore uses TEN by default.
+        # Anime-Whisper/Cohere retain their WhisperSeg default. Explicit
+        # --pass{N}-speech-segmenter choices always win.
         _aw_gen = qwen_defaults.get("qwen_generator_backend", "qwen3")
-        if _aw_gen in ("anime-whisper", "cohere") and not pass_config.get("speech_segmenter"):
-            qwen_defaults["qwen_segmenter"] = "whisperseg"
-            logger.debug("Pass %s: %s default qwen_segmenter = whisperseg", pass_number, _aw_gen)
+        if not _segmenter_explicit:
+            if _aw_gen == "parakeet":
+                qwen_defaults["qwen_segmenter"] = "ten"
+                logger.debug("Pass %s: parakeet default qwen_segmenter = ten", pass_number)
+            elif _aw_gen in ("anime-whisper", "cohere"):
+                qwen_defaults["qwen_segmenter"] = "whisperseg"
+                logger.debug("Pass %s: %s default qwen_segmenter = whisperseg", pass_number, _aw_gen)
         # Resolve sensitivity preset into segmenter_config
         # Layering: YAML spec < sensitivity preset < user custom overrides
         qwen_sensitivity = (

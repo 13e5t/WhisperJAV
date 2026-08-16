@@ -62,6 +62,9 @@ except ImportError:
     sf = None  # type: ignore[assignment]
 
 
+_NATIVE_TIMING_SOURCES = frozenset({"native", "native_ctc"})
+
+
 class DecoupledSubtitlePipeline:
     """
     Model-agnostic subtitle generation pipeline.
@@ -602,21 +605,32 @@ class DecoupledSubtitlePipeline:
         same small dictionaries used by TextAligner output so the existing
         reconstruction and regrouping code remains the single downstream
         path.  Invalid records are dropped; an all-invalid result becomes
-        ``None`` and receives the documented frame-boundary fallback.
+        ``None`` and receives the documented frame-boundary fallback. A
+        generator's explicit timing provenance is preserved as ``source`` so
+        native CTC timing cannot be confused with synthetic fallback timing.
         """
         if result is None:
             return None
 
         metadata = getattr(result, "metadata", {}) or {}
+        timing_source = metadata.get("timing_source")
+        if timing_source and timing_source not in _NATIVE_TIMING_SOURCES:
+            logger.warning(
+                "[DecoupledPipeline] Generator timing source '%s' is not native; "
+                "using the parent frame fallback",
+                timing_source,
+            )
+            return None
+
         invalid_count = metadata.get("native_timestamp_invalid_count", 0)
         try:
             invalid_count = int(invalid_count)
         except (TypeError, ValueError):
             invalid_count = 0
-        if invalid_count > 0:
+        if invalid_count > 0 or metadata.get("timestamp_status") == "malformed":
             logger.warning(
-                "[DecoupledPipeline] Native timestamp result contains %d malformed "
-                "record(s); using the parent frame fallback",
+                "[DecoupledPipeline] Native timestamp result is malformed "
+                "(%d reported record(s)); using the parent frame fallback",
                 invalid_count,
             )
             return None
@@ -627,6 +641,7 @@ class DecoupledSubtitlePipeline:
         if not native_words:
             return None
 
+        word_source = "native_ctc" if timing_source == "native_ctc" else "native"
         normalized: list[dict[str, Any]] = []
         for native in native_words:
             if isinstance(native, dict):
@@ -658,7 +673,7 @@ class DecoupledSubtitlePipeline:
                 "word": token,
                 "start": start_value,
                 "end": end_value,
-                "source": "native",
+                "source": word_source,
             })
 
         return normalized or None
@@ -939,7 +954,7 @@ class DecoupledSubtitlePipeline:
                         scene_alignments[scene_idx],
                     )
                     native_flags = [
-                        any(word.get("source") == "native" for word in group)
+                        any(word.get("source") in _NATIVE_TIMING_SOURCES for word in group)
                         for group in frame_word_groups
                     ]
 
@@ -1051,6 +1066,7 @@ class DecoupledSubtitlePipeline:
                                     "word": text.strip(),
                                     "start": frame.start,
                                     "end": frame.end,
+                                    "source": "frame_fallback",
                                 }])
                         word_count = len(frame_word_groups)
                         result = reconstruct_frame_native(frame_word_groups, audio_path)
@@ -1060,9 +1076,10 @@ class DecoupledSubtitlePipeline:
                         words = []
                         for frame, text in zip(frames, texts):
                             if text.strip():
-                                words.extend(
-                                    split_frame_to_words(text, frame.start, frame.end)
-                                )
+                                frame_words = split_frame_to_words(text, frame.start, frame.end)
+                                for word in frame_words:
+                                    word["source"] = "synthetic_proportional"
+                                words.extend(frame_words)
                         word_count = len(words)
                         # G1 complement: VAD_ONLY preserves exact frame boundaries —
                         # suppress_silence=False prevents stable-ts silence detection

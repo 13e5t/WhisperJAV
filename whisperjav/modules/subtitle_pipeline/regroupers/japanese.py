@@ -15,6 +15,7 @@ from typing import Any
 from whisperjav.utils.logger import logger
 
 WordDict = dict[str, Any]
+_NATIVE_TIMING_SOURCES = frozenset({"native", "native_ctc"})
 
 
 @dataclass(frozen=True)
@@ -127,7 +128,8 @@ class JapaneseNativeRegrouper:
             frame_word_groups: Scene-relative words grouped by temporal frame.
             parent_regions: Scene-relative ``(start, end)`` bounds per frame.
             native_flags: Whether each frame has reliable native timing.  If
-                omitted, ``source == "native"`` is used for detection.
+                omitted, ``source`` values ``native`` and ``native_ctc`` are
+                used for detection.
 
         Returns:
             ``(cue_groups, diagnostics)``.  Each inner cue group contains the
@@ -150,7 +152,7 @@ class JapaneseNativeRegrouper:
             is_native = (
                 native_flags[index]
                 if native_flags is not None and index < len(native_flags)
-                else any(word.get("source") == "native" for word in words)
+                else any(word.get("source") in _NATIVE_TIMING_SOURCES for word in words)
             )
 
             if not is_native:
